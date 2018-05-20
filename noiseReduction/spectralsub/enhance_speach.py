@@ -1,6 +1,7 @@
 # encoding=utf-8
 #!/usr/bin/env python
 import sys
+import os
 import numpy as np
 import wave
 import math
@@ -11,19 +12,30 @@ import nextpow2
 
 def SpectralSubstraction( wavName ):
     
-    ''' ================= read wav ===================='''
-    f = wave.open( wavName )
-    # 读取格式信息
-    # (nchannels, sampwidth, framerate, nframes, comptype, compname)
-    params = f.getparams()
-    nchannels, sampwidth, framerate, nframes = params[:4]
-    fs = framerate
-    # 读取波形数据
-    str_data = f.readframes(nframes)
-    f.close()
-    # 将波形数据转换为数组
-    datax = np.fromstring(str_data, dtype=np.short)
-     
+    filetype = os.path.basename(wavName).split('.')[1]
+    if('wav' == filetype.lower()):
+        ''' ================= read wav ===================='''
+        f = wave.open( wavName )
+        # 读取格式信息
+        # (nchannels, sampwidth, framerate, nframes, comptype, compname)
+        params = f.getparams()
+        nchannels, sampwidth, framerate, nframes = params[:4]
+        fs = framerate
+        # 读取波形数据
+        str_data = f.readframes(nframes)
+        f.close()
+        # 将波形数据转换为数组
+        datax = np.fromstring(str_data, dtype=np.short)
+    if('pcm' == filetype.lower()):
+        datax = np.fromfile(wavName)
+        datax.dtype = np.int16
+        nchannels = 1
+        sampwidth = 2
+        framerate = 16000
+        nframes = len(datax)
+        params = (nchannels, sampwidth, framerate, nframes, 'NONE', 'not compressed')
+        fs = framerate
+        
     
     ''' ==================== set parameter =================='''
     leng = 20 * fs // 1000 #segment length
@@ -47,14 +59,6 @@ def SpectralSubstraction( wavName ):
     # Noise magnitude calculations - assuming that the first 5 frames is noise/silence
     nFFT = 2 * ( 2 ** nextpow2.nextpow2(leng) )
     print('(len, nFFT): (%d, %d)' %(leng, nFFT))
-    
-    noise_mean = np.zeros(nFFT)
-    j = 0
-    for k in range(1, 6):
-        noise_mean = noise_mean + abs(np.fft.fft(win * datax[j:j + leng], nFFT))
-        j = j + leng
-    noise_mu = noise_mean / 5
-
 
     
     # --- allocate memory and initialize various variables
@@ -64,11 +68,19 @@ def SpectralSubstraction( wavName ):
     Nframes = len(datax) // len2 - 1 #(0, Nframes)
     print((Nframes, len(datax), len2))
     xfinal = np.zeros(Nframes * len2) #(0, Nframe*len2)
-    
-    print(datax)
 
-   
+  
+    noise_mean = np.zeros(nFFT)
+    j = len(datax) - 5 * leng
+    for k in range(1, 6):
+        noise_mean = noise_mean + abs(np.fft.fft(win * datax[j:j + leng], nFFT))
+        j = j + leng
+    noise_mu = noise_mean / 5
+    print(noise_mu)
+
+
     '''========================= Start Processing ============================'''
+    k = 1
     for n in range(0, Nframes):
         # Windowing
         insign = win * datax[ (k-1) : (k + leng - 1)]
@@ -130,23 +142,24 @@ def SpectralSubstraction( wavName ):
             # 用估计出来的噪声信号表示下限值
             sub_speech[z] = beta * noise_mu[z] ** Expnt
             
-            ''' ================= simple VAD: SNRseg < Thres =================='''
-            if SNRseg < Thres:  # Update noise spectrum
-                noise_temp = G * noise_mu ** Expnt + (1 - G) * magni ** Expnt  # 平滑处理噪声功率谱
-                noise_mu = noise_temp ** (1 / Expnt)  # 新的噪声幅度谱
-            # flipud函数实现矩阵的上下翻转，是以矩阵的“水平中线”为对称轴
-            # 交换上下对称元素
-            sub_speech[nFFT // 2 + 1:nFFT] = np.flipud(sub_speech[1:nFFT // 2])
+        ''' ================= simple VAD: SNRseg < Thres =================='''
+        if SNRseg < Thres:  # Update noise spectrum
+            noise_temp = G * noise_mu ** Expnt + (1 - G) * magni ** Expnt  # 平滑处理噪声功率谱
+            noise_mu = noise_temp ** (1 / Expnt)  # 新的噪声幅度谱
             
-            x_phase = (sub_speech ** (1 / Expnt)) * (np.array([math.cos(x) for x in theta]) + img * (np.array([math.sin(x) for x in theta])))
+        # flipud函数实现矩阵的上下翻转，是以矩阵的“水平中线”为对称轴
+        # 交换上下对称元素
+        sub_speech[nFFT // 2 + 1:nFFT] = np.flipud(sub_speech[1:nFFT // 2])
+            
+        x_phase = (sub_speech ** (1 / Expnt)) * (np.array([math.cos(x) for x in theta]) + img * (np.array([math.sin(x) for x in theta])))
 
             
-            # take the IFFT
-            xi = np.fft.ifft(x_phase).real
-            # --- Overlap and add ---------------
-            xfinal[k-1:k + len2 - 1] = x_old + xi[0:len1]
-            x_old = xi[0 + len1:leng]
-            k = k + len2
+        # take the IFFT
+        xi = np.fft.ifft(x_phase).real
+        # --- Overlap and add ---------------
+        xfinal[k-1:k + len2 - 1] = x_old + xi[0:len1]
+        x_old = xi[0 + len1:leng]
+        k = k + len2
 
             
     ''' ========================= save file =============================='''
